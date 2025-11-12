@@ -1,8 +1,7 @@
-// api/webhook.js
+// api/webhook.js (actualizado: carga Firebase solo en POST)
 const axios = require("axios");
 const dayjs = require("dayjs");
 const utc = require("dayjs/plugin/utc"); dayjs.extend(utc);
-const { db } = require("../lib/firebase");
 
 const fmtCLP = new Intl.NumberFormat("es-CL");
 
@@ -13,16 +12,6 @@ async function sendWpp(to, text) {
     { messaging_product: "whatsapp", to, text: { body: text } },
     { headers: { Authorization: `Bearer ${process.env.META_TOKEN}` } }
   );
-}
-
-async function getSession(phone) {
-  const ref = db.collection("wh_sessions").doc(phone);
-  const snap = await ref.get();
-  return snap.exists ? snap.data() : { step: "idle", draft: {} };
-}
-async function setSession(phone, data) {
-  const ref = db.collection("wh_sessions").doc(phone);
-  await ref.set(data, { merge: true });
 }
 
 function parseMonto(raw) {
@@ -43,7 +32,7 @@ function normCat(input) {
 async function recalcAfterInsert() { return true; }
 
 module.exports = async (req, res) => {
-  // GET: verificación del webhook
+  // GET: verificación del webhook (no depende de Firebase)
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -54,8 +43,11 @@ module.exports = async (req, res) => {
     return res.status(403).send("Forbidden");
   }
 
-  // POST: mensajes entrantes
+  // POST: mensajes entrantes (cargamos Firebase aquí para no romper la verificación GET)
   if (req.method === "POST") {
+    // Cargar Firebase solo cuando se necesita
+    const { db } = require("../libfirebase");
+
     try {
       const msg = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
       if (!msg) return res.status(200).end();
@@ -69,6 +61,18 @@ module.exports = async (req, res) => {
       if (!allowed.includes(phone)) return res.status(200).end();
 
       const text = (msg.text?.body || "").trim();
+
+      // Sesiones en Firestore
+      async function getSession(phone) {
+        const ref = db.collection("wh_sessions").doc(phone);
+        const snap = await ref.get();
+        return snap.exists ? snap.data() : { step: "idle", draft: {} };
+      }
+      async function setSession(phone, data) {
+        const ref = db.collection("wh_sessions").doc(phone);
+        await ref.set(data, { merge: true });
+      }
+
       let session = await getSession(phone);
 
       // Activación con cualquier mensaje si está idle
