@@ -1,7 +1,18 @@
-// api/webhook.js (actualizado: carga Firebase solo en POST)
+// /api/webhook.js — versión final sincronizada con tu web
+// - Guarda en la colección `egresos` con los MISMOS campos que usa index.html
+//   { amount:number, date:"YYYY-MM-DD", category:string, note:string, createdAt:serverTimestamp }
+// - Personaliza el saludo según el número que escribe
+
 const axios = require("axios");
 const dayjs = require("dayjs");
-const utc = require("dayjs/plugin/utc"); dayjs.extend(utc);
+const utc = require("dayjs/plugin/utc");
+dayjs.extend(utc);
+
+// Nombres por número (sin +). Agrega más si quieres
+const NAME_BY_PHONE = {
+  "56965741027": "Rebeca",
+  "56961068305": "Vicente",
+};
 
 const fmtCLP = new Intl.NumberFormat("es-CL");
 
@@ -20,19 +31,27 @@ function parseMonto(raw) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-// Orden: 1 Racional, 2 Negocio, 3 Rebeca
+// 1=Racional, 2=Negocio, 3=Rebeca
 function normCat(input) {
   const t = (input || "").toString().trim().toLowerCase();
-  if (["1","racional","ra"].includes(t)) return "Racional";
-  if (["2","negocio","ne"].includes(t)) return "Negocio";
-  if (["3","rebeca","re","rebe"].includes(t)) return "Rebeca";
+  if (["1", "racional", "ra"].includes(t)) return "Racional";
+  if (["2", "negocio", "ne"].includes(t)) return "Negocio";
+  if (["3", "rebeca", "re", "rebe"].includes(t)) return "Rebeca";
   return null;
 }
 
-async function recalcAfterInsert() { return true; }
+// YYYY-MM-DD en zona Chile
+function ymdChile(date = new Date()) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Santiago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date); // ej: 2025-11-12
+}
 
 module.exports = async (req, res) => {
-  // GET: verificación del webhook (no depende de Firebase)
+  // === GET: verificación del webhook (sin Firebase) ===
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -43,10 +62,10 @@ module.exports = async (req, res) => {
     return res.status(403).send("Forbidden");
   }
 
-  // POST: mensajes entrantes (cargamos Firebase aquí para no romper la verificación GET)
+  // === POST: mensajes entrantes ===
   if (req.method === "POST") {
-    // Cargar Firebase solo cuando se necesita
-    const { db } = require("../libfirebase");
+    // Cargar Firebase SOLO aquí para no romper la verificación GET
+    const { db, admin } = require("../libfirebase");
 
     try {
       const msg = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
@@ -54,10 +73,10 @@ module.exports = async (req, res) => {
 
       const allowed = (process.env.ALLOWED_PHONES || "")
         .split(",")
-        .map(s => s.trim())
+        .map((s) => s.trim())
         .filter(Boolean);
 
-      const phone = msg.from;
+      const phone = msg.from; // ej: 56961068305
       if (!allowed.includes(phone)) return res.status(200).end();
 
       const text = (msg.text?.body || "").trim();
@@ -79,7 +98,11 @@ module.exports = async (req, res) => {
       if (session.step === "idle" || /^egreso$/i.test(text)) {
         session = { step: "ask_monto", draft: {} };
         await setSession(phone, session);
-        await sendWpp(phone, "💸 ¿Monto del egreso? (ej: 21.990)\nEscribe “cancelar” para salir.");
+        const name = NAME_BY_PHONE[phone] ? `, ${NAME_BY_PHONE[phone]}` : "";
+        await sendWpp(
+          phone,
+          `Hola${name}!\n\n💸 ¿Monto del egreso? (ej: 21.990)\nEscribe “cancelar” para salir.`
+        );
         return res.status(200).end();
       }
 
@@ -111,7 +134,10 @@ module.exports = async (req, res) => {
       if (session.step === "ask_cat") {
         const cat = normCat(text);
         if (!cat) {
-          await sendWpp(phone, "Elige 1, 2 o 3:\n1. Racional\n2. Negocio\n3. Rebeca");
+          await sendWpp(
+            phone,
+            "Elige 1, 2 o 3:\n1. Racional\n2. Negocio\n3. Rebeca"
+          );
           return res.status(200).end();
         }
         session.draft.categoria = cat;
@@ -124,9 +150,8 @@ module.exports = async (req, res) => {
       // Paso 3: Descripción
       if (session.step === "ask_desc") {
         const desc = text === "-" ? "" : text;
-        const fechaISO = dayjs().utc().toISOString();
         session.draft.descripcion = desc;
-        session.draft.fecha = fechaISO;
+        session.draft.dateYMD = ymdChile();
         session.step = "confirm";
         await setSession(phone, session);
 
@@ -134,7 +159,8 @@ module.exports = async (req, res) => {
           `Confirma:\n` +
           `• Monto: $${fmtCLP.format(session.draft.monto)}\n` +
           `• Categoría: ${session.draft.categoria}\n` +
-          `• Desc: ${desc || "(sin descripción)"}`;
+          `• Desc: ${desc || "(sin descripción)"}\n` +
+          `• Fecha: ${session.draft.dateYMD}`;
         await sendWpp(phone, `${resumen}\n\n¿Guardo? Responde “sí” o “no”.`);
         return res.status(200).end();
       }
@@ -142,22 +168,33 @@ module.exports = async (req, res) => {
       // Paso 4: Confirmación
       if (session.step === "confirm") {
         if (/^s[ií]$/i.test(text)) {
-          const now = dayjs().utc().toISOString();
+          const ymd = session.draft.dateYMD || ymdChile();
           await db.collection("egresos").add({
-            created_at: now,
-            fecha: session.draft.fecha || now,
-            fuente: "whatsapp",
-            phone,
-            monto: session.draft.monto,
-            categoria: session.draft.categoria,
-            descripcion: session.draft.descripcion || "",
+            amount: session.draft.monto,
+            date: ymd, // <- STRING YYYY-MM-DD como usa la web
+            category: session.draft.categoria,
+            note: session.draft.descripcion || "",
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
           });
+
+          const nombre = NAME_BY_PHONE[phone];
+          const detalle = `Se registró el egreso de $${fmtCLP.format(
+            session.draft.monto
+          )} en "${session.draft.categoria}"${
+            session.draft.descripcion ? ` — “${session.draft.descripcion}”` : ""
+          } para la fecha ${ymd}.`;
+
           await setSession(phone, { step: "idle", draft: {} });
-          await recalcAfterInsert(session.draft.fecha || now);
-          await sendWpp(phone, "✅ Guardado. Manda cualquier mensaje para registrar otro.");
+          await sendWpp(
+            phone,
+            `✅ Listo${nombre ? ", " + nombre : ""}! ${detalle}\nYa aparece en la web (actualización en vivo).`
+          );
         } else {
           await setSession(phone, { step: "idle", draft: {} });
-          await sendWpp(phone, "❌ Cancelado. Manda cualquier mensaje si quieres empezar de nuevo.");
+          await sendWpp(
+            phone,
+            "❌ Cancelado. Manda cualquier mensaje si quieres empezar de nuevo."
+          );
         }
         return res.status(200).end();
       }
@@ -174,6 +211,5 @@ module.exports = async (req, res) => {
     }
   }
 
-  // Otros métodos
   return res.status(405).send("Method Not Allowed");
 };
