@@ -187,7 +187,7 @@ module.exports = async (req, res) => {
           await setSession(phone, { step: "idle", draft: {} });
           await sendWpp(
             phone,
-            `✅ Listo${nombre ? ", " + nombre : ""}! ${detalle}\nYa aparece en la web (actualización en vivo).`
+            `✅ Listo${nombre ? ", " + nombre : ""}! ${detalle}\nYa figura en la web (Aprobado).`
           );
         } else {
           await setSession(phone, { step: "idle", draft: {} });
@@ -213,3 +213,4 @@ module.exports = async (req, res) => {
 
   return res.status(405).send("Method Not Allowed");
 };
+
